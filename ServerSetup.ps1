@@ -435,6 +435,7 @@ $HTML = @'
     <h1><span>//</span> Server Post-Deployment Setup</h1>
     <p>Configure network, hostname, and domain membership. All changes are applied via PowerShell on the local machine.</p>
     <div class="hostname-badge" id="currentHost">Loading...</div>
+    <div class="hostname-badge" id="timerBadge" style="margin-left:8px; color:#f87171;">--:--</div>
   </div>
 
   <!-- SECTION 1: NETWORK -->
@@ -708,12 +709,32 @@ $HTML = @'
     }
   }
 
+  // --- Countdown timer ---
+  let secsLeft = 900; // default 15 min, updated from server
+  function updateTimer() {
+    if (secsLeft <= 0) {
+      document.getElementById('timerBadge').textContent = 'EXPIRED';
+      toast('Session expired - the server listener has stopped.', 'err');
+      return;
+    }
+    secsLeft--;
+    const m = Math.floor(secsLeft / 60);
+    const s = secsLeft % 60;
+    const badge = document.getElementById('timerBadge');
+    badge.textContent = m + ':' + (s < 10 ? '0' : '') + s + ' remaining';
+    if (secsLeft <= 120) badge.style.color = '#f87171';
+    else badge.style.color = '#fbbf24';
+  }
+  setInterval(updateTimer, 1000);
+
   // --- Init ---
   async function init() {
     try {
       const res = await api('getInfo');
       document.getElementById('currentHost').textContent = res.hostname || '?';
       document.getElementById('currentHostInput').value = res.hostname || '?';
+      if (res.secondsRemaining) secsLeft = res.secondsRemaining;
+      updateTimer();
     } catch(e) {}
     loadAdapters();
   }
@@ -740,11 +761,17 @@ try {
     exit 1
 }
 
+# Failsafe: auto-shutdown after 15 minutes
+$TimeoutMinutes = 15
+$script:StartTime = [DateTime]::UtcNow
+$script:Deadline  = $script:StartTime.AddMinutes($TimeoutMinutes)
+
 Write-Host ""
 Write-Host "  Server Post-Deployment Setup" -ForegroundColor Cyan
 Write-Host "  ----------------------------" -ForegroundColor DarkGray
 Write-Host "  Listening on $Prefix" -ForegroundColor Green
-Write-Host "  Press Ctrl+C to stop." -ForegroundColor DarkGray
+Write-Host "  Auto-shutdown in $TimeoutMinutes minutes (at $($script:Deadline.ToLocalTime().ToString('HH:mm:ss')))" -ForegroundColor Yellow
+Write-Host "  Press Ctrl+C to stop early." -ForegroundColor DarkGray
 Write-Host ""
 
 # Open default browser
@@ -753,7 +780,25 @@ Start-Process $Prefix
 # Serve requests
 try {
     while ($listener.IsListening) {
-        $context  = $listener.GetContext()
+
+        # --- Timeout check ---
+        if ([DateTime]::UtcNow -ge $script:Deadline) {
+            Write-Host ""
+            Write-Host "  [TIMEOUT] $TimeoutMinutes minutes elapsed - shutting down." -ForegroundColor Red
+            break
+        }
+
+        # Use async GetContext with a 2-second poll so we can check the clock
+        $asyncResult = $listener.BeginGetContext($null, $null)
+        while (-not $asyncResult.AsyncWaitHandle.WaitOne(2000)) {
+            if ([DateTime]::UtcNow -ge $script:Deadline) {
+                Write-Host ""
+                Write-Host "  [TIMEOUT] $TimeoutMinutes minutes elapsed - shutting down." -ForegroundColor Red
+                $listener.Stop()
+                return
+            }
+        }
+        $context = $listener.EndGetContext($asyncResult)
         $request  = $context.Request
         $response = $context.Response
 
@@ -782,7 +827,8 @@ try {
                 switch ($json.action) {
 
                     'getInfo' {
-                        $result = @{ hostname = $env:COMPUTERNAME }
+                        $secsLeft = [math]::Max(0, [math]::Floor(($script:Deadline - [DateTime]::UtcNow).TotalSeconds))
+                        $result = @{ hostname = $env:COMPUTERNAME; secondsRemaining = $secsLeft }
                     }
 
                     'getAdapters' {
