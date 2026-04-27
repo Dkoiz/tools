@@ -1,0 +1,35 @@
+$Servers = (Get-ADComputer -Filter "OperatingSystem -like '*Server*'" -SearchBase 'OU=Servers,DC=contoso,DC=com').Name
+$NewPassword = Read-Host "Enter new break-glass password" -AsSecureString
+
+Invoke-Command -ComputerName $Servers -ThrottleLimit 25 -ScriptBlock {
+    param($pw)
+    try {
+        $builtin = Get-LocalUser | Where-Object { $_.SID.Value -like 'S-1-5-21-*-500' }
+        if (-not $builtin) {
+            return [pscustomobject]@{ Computer=$env:COMPUTERNAME; Status='NotFound' }
+        }
+
+        # 1. Reset the password
+        Set-LocalUser -Name $builtin.Name -Password $pw `
+                      -PasswordNeverExpires $true `
+                      -UserMayChangePassword $false
+
+        # 2. Make sure it stays disabled (it auto-enables in Safe Mode anyway)
+        if ($builtin.Enabled) { Disable-LocalUser -Name $builtin.Name }
+
+        # 3. Re-read state for the report
+        $after = Get-LocalUser -Name $builtin.Name
+        [pscustomobject]@{
+            Computer            = $env:COMPUTERNAME
+            Account             = $after.Name
+            Enabled             = $after.Enabled
+            PasswordLastSet     = $after.PasswordLastSet
+            PasswordNeverExpires= $after.PasswordNeverExpires
+            Status              = 'OK'
+        }
+    }
+    catch {
+        [pscustomobject]@{ Computer=$env:COMPUTERNAME; Status="Error: $($_.Exception.Message)" }
+    }
+} -ArgumentList $NewPassword |
+    Export-Csv C:\temp\breakglass-reset.csv -NoTypeInformation
