@@ -1798,6 +1798,12 @@ function New-ADUsersPage {
     # ----- Selection: populate detail pane -----
     $refreshDetail = {
         param($user)
+        # Pull parent-scope variables into local scope so that the button
+        # click handlers' .GetNewClosure() calls can capture them correctly.
+        # Without this, Set-StrictMode -Version Latest throws "variable cannot
+        # be retrieved because it has not been set" when those handlers fire.
+        $searchTxt = $searchTxt
+        $doSearch   = $doSearch
         $detailPanel.Children.Clear()
         $actionPanel.Children.Clear()
         if (-not $user) {
